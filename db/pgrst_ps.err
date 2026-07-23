@@ -1,0 +1,4 @@
+02/Jul/2026:15:01:10 +0700: Starting PostgREST 14.14...
+02/Jul/2026:15:01:10 +0700: API server listening on 127.0.0.1:3001
+02/Jul/2026:15:01:10 +0700: Listener connected to PostgreSQL 18.4 on x86_64-windows, compiled by msvc-19.44.35226, 64-bit on "localhost:5432" and listening for database notifications on the "pgrst" channel
+02/Jul/2026:15:01:17 +0700: {"code":"PGRST002","details":null,"hint":null,"message":"Could not query the database for the schema cache. Retrying."}
