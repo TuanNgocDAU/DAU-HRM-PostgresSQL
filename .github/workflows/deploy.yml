@@ -1,0 +1,97 @@
+name: CD - Phát hành lên máy chủ nội bộ
+
+# Chỉ chạy thủ công từ tab Actions (Run workflow).
+# Chưa bật trigger `push: main` cho tới khi máy chủ nội bộ sẵn sàng (xem mục 7
+# của doc/09-Huong-Dan-Quy-Trinh-CICD.md: self-hosted runner, dịch vụ NSSM,
+# secret PGPASSWORD, environment production).
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: 'deploy-prod'
+  cancel-in-progress: false   # KHÔNG hủy giữa chừng khi đang deploy
+
+jobs:
+  deploy:
+    name: Build & Deploy Production
+    runs-on: [self-hosted, dau-hrm-prod]   # chạy trên máy chủ nội bộ
+    environment: production                # bật cơ chế phê duyệt trước khi chạy
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      APP_DIR: C:\DAU-HRM\app
+      BACKUP_DIR: C:\DAU-HRM\backup
+      PG_BIN: C:\Program Files\PostgreSQL\18\bin
+
+    steps:
+      - name: Checkout mã nguồn
+        uses: actions/checkout@v4
+
+      - name: Cài đặt Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Cài đặt phụ thuộc
+        run: npm ci
+
+      - name: Kiểm tra kiểu TypeScript
+        run: npm run lint
+
+      - name: Build ứng dụng
+        run: npm run build
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Sao lưu database qlns trước khi phát hành
+        env:
+          PGPASSWORD: ${{ secrets.PGPASSWORD }}
+        run: |
+          $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+          New-Item -ItemType Directory -Force $env:BACKUP_DIR | Out-Null
+          & "$env:PG_BIN\pg_dump.exe" -U postgres -h localhost -p 5432 `
+              -F c -d qlns -f "$env:BACKUP_DIR\qlns-$stamp.dump"
+          if ($LASTEXITCODE -ne 0) { throw "pg_dump that bai" }
+          Write-Host "Da sao luu: qlns-$stamp.dump"
+
+      - name: Dừng dịch vụ API
+        run: nssm stop DAU-HRM-API
+
+      - name: Cập nhật mã nguồn và bản build
+        run: |
+          New-Item -ItemType Directory -Force "$env:APP_DIR" | Out-Null
+          # Xóa bản build cũ rồi chép bản mới
+          Remove-Item -Recurse -Force "$env:APP_DIR\dist" -ErrorAction SilentlyContinue
+          Copy-Item -Recurse -Force dist          "$env:APP_DIR\dist"
+          Copy-Item -Recurse -Force server        "$env:APP_DIR\server"
+          Copy-Item -Force package.json           "$env:APP_DIR\"
+          Copy-Item -Force package-lock.json      "$env:APP_DIR\"
+
+      - name: Cài phụ thuộc runtime cho API server
+        run: |
+          Push-Location "$env:APP_DIR"
+          npm ci --omit=dev
+          Pop-Location
+
+      - name: Khởi động lại dịch vụ API
+        run: nssm start DAU-HRM-API
+
+      - name: Kiểm tra sức khỏe hệ thống (health check)
+        run: |
+          $ok = $false
+          foreach ($i in 1..10) {
+            try {
+              $r = Invoke-RestMethod http://127.0.0.1:3001/api/health -TimeoutSec 5
+              if ($r.ok -and $r.database -eq 'qlns') { $ok = $true; break }
+            } catch { Start-Sleep -Seconds 3 }
+          }
+          if (-not $ok) { throw "Health check that bai - can rollback (muc 11)" }
+          Write-Host "He thong hoat dong binh thuong."
+
+      - name: Nạp lại cấu hình Nginx
+        if: success()
+        run: nginx -s reload
+        continue-on-error: true
